@@ -1,0 +1,776 @@
+{
+  "id": "alertAnalyzer001",
+  "name": "alert-analyzer (Grafana → AI 분석 → Slack)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "name": "Grafana Alert Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "grafana-alert",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "webhookId": "grafana-alert"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "name": "Normalize alerts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// [Normalize alerts] Grafana 웹훅 payload → 알럿 1건당 1 item\n// mode: runOnceForAllItems\nconst body = $input.first().json.body ?? {};\nconst alerts = body.alerts ?? [];\n\nconst BASE = '{app=\"alertlab\", level=\"ERROR\"}';\n\n// 알럿 종류별로 \"원인 로그\" 를 찾는 Loki 쿼리를 다르게 잡는다\nfunction lokiQueryFor(alertname, errorType) {\n  switch (alertname) {\n    case 'DbLockContention':\n      return `${BASE} |~ \"(?i)deadlock|lock wait timeout\"`;\n    case 'HikariPending':\n      return `${BASE} |~ \"Connection is not available\"`;\n    case 'AppErrorLog':\n    case 'AppErrorBurst':\n      return errorType ? `${BASE} | json | error_type=\"${errorType}\"` : BASE;\n    default:\n      return BASE;\n  }\n}\n\n// Grafana 는 알럿 규칙 프로비저닝 파일의 ${VAR} 를 치환하지 않으므로 여기서 채운다 (예: runbook_url)\nconst fillEnv = (annotations) =>\n  Object.fromEntries(\n    Object.entries(annotations).map(([k, v]) => [\n      k,\n      String(v).replace(/\\$\\{(GITHUB_OWNER|GITHUB_REPO)\\}/g, (_, name) => $env[name] ?? ''),\n    ]),\n  );\n\nreturn alerts.map((a) => {\n  const labels = a.labels ?? {};\n  const startsAt = a.startsAt ?? new Date().toISOString();\n  return {\n    json: {\n      status: a.status, // firing | resolved\n      alertname: labels.alertname ?? 'unknown',\n      severity: labels.severity ?? 'minor',\n      error_type: labels.error_type || 'app',\n      service: labels.service ?? 'alertlab',\n      labels,\n      annotations: fillEnv(a.annotations ?? {}),\n      startsAt,\n      endsAt: a.endsAt,\n      fingerprint: a.fingerprint,\n      values: a.values ?? {},\n      loki: {\n        query: lokiQueryFor(labels.alertname, labels.error_type),\n        start: new Date(Date.parse(startsAt) - 10 * 60 * 1000).toISOString(),\n        end: new Date().toISOString(),\n      },\n    },\n  };\n});\n"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "name": "Firing?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-Firing?",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "firing",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "name": "Build resolved message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        520
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// [Build resolved message] resolved 알럿은 LLM 분석 없이 짧은 해제 메시지만\n// mode: runOnceForEachItem\nconst a = $json;\nconst kst = (iso) => new Date(iso).toLocaleString('sv-SE', { timeZone: 'Asia/Seoul' }); // yyyy-MM-dd HH:mm:ss\n\nconst text = `✅ *[RESOLVED] ${a.alertname}* (${a.severity}) — ${a.annotations.summary ?? ''}`;\nreturn {\n  json: {\n    slack: {\n      text,\n      blocks: [\n        { type: 'section', text: { type: 'mrkdwn', text } },\n        {\n          type: 'context',\n          elements: [{ type: 'mrkdwn', text: `🕐 발생 ${kst(a.startsAt)} → 해제 ${kst(a.endsAt)}` }],\n        },\n      ],\n    },\n  },\n};\n"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "name": "Check dedup",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        660,
+        200
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) AS recent FROM alert_dedup WHERE fingerprint = $1 AND last_analyzed_at > NOW() - INTERVAL 10 MINUTE",
+        "options": {
+          "queryReplacement": "={{ $json.fingerprint }}"
+        }
+      },
+      "credentials": {
+        "mySql": {
+          "id": "mysqlOpsCred0001",
+          "name": "MySQL ops"
+        }
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000006",
+      "name": "Not analyzed in 10m?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-Not analyzed in 10m?",
+              "leftValue": "={{ Number($json.recent) }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000007",
+      "name": "Mark analyzed",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        1100,
+        200
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO alert_dedup (fingerprint, alertname, last_analyzed_at) VALUES ($1, $2, NOW()) ON DUPLICATE KEY UPDATE alertname = VALUES(alertname), last_analyzed_at = NOW()",
+        "options": {
+          "queryReplacement": "={{ $('Normalize alerts').item.json.fingerprint }},{{ $('Normalize alerts').item.json.alertname }}"
+        }
+      },
+      "credentials": {
+        "mySql": {
+          "id": "mysqlOpsCred0001",
+          "name": "MySQL ops"
+        }
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000008",
+      "name": "Query Loki",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        200
+      ],
+      "parameters": {
+        "url": "http://loki:3100/loki/api/v1/query_range",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ $('Normalize alerts').item.json.loki.query }}"
+            },
+            {
+              "name": "start",
+              "value": "={{ $('Normalize alerts').item.json.loki.start }}"
+            },
+            {
+              "name": "end",
+              "value": "={{ $('Normalize alerts').item.json.loki.end }}"
+            },
+            {
+              "name": "limit",
+              "value": "20"
+            },
+            {
+              "name": "direction",
+              "value": "backward"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000009",
+      "name": "Get app info",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        200
+      ],
+      "parameters": {
+        "url": "http://app:8080/actuator/info",
+        "options": {
+          "timeout": 3000
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000010",
+      "name": "Extract error context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// [Extract error context] Loki 로그 + 앱 커밋 SHA → 분석용 컨텍스트\n// mode: runOnceForEachItem\nconst alert = $('Normalize alerts').item.json;\nconst loki = $('Query Loki').item.json;\nconst info = $('Get app info').item.json;\n\nconst OWNER = $env.GITHUB_OWNER;\nconst REPO = $env.GITHUB_REPO;\nconst PKG = 'com.example.alertlab.';\n\n// ---- 1. 로그 중 스택트레이스가 있는 가장 최근 것 선택\nconst entries = [];\nfor (const stream of loki?.data?.result ?? []) {\n  for (const [ts, line] of stream.values ?? []) {\n    try {\n      entries.push({ ts: Number(String(ts).slice(0, 13)), ...JSON.parse(line) });\n    } catch (e) {\n      // JSON 이 아닌 로그는 무시\n    }\n  }\n}\nentries.sort((x, y) => y.ts - x.ts);\nconst log = entries.find((e) => e.stack_trace) ?? entries[0] ?? null;\n\n// ---- 2. 민감정보 마스킹 (외부 LLM 으로 나가기 전)\nconst mask = (s) =>\n  String(s ?? '')\n    .replace(/[\\w.+-]+@[\\w-]+\\.[\\w.]+/g, '<email>')\n    .replace(/(Bearer\\s+)[\\w\\-.=]+/gi, '$1<token>')\n    .replace(/\\b(sk|ghp|gho|github_pat|xox[abp])[-_][\\w-]{10,}/g, '<secret>')\n    .replace(/(password|passwd|pwd|secret|token)([\"']?\\s*[:=]\\s*[\"']?)[^\\s\"',;]+/gi, '$1$2<masked>');\n\n// ---- 3. 스택 축약: 상위 20줄 + 우리 패키지 프레임 + Caused by\nconst stackLines = String(log?.stack_trace ?? '').split('\\n').map((l) => l.replace(/\\r$/, ''));\nconst kept = [];\nstackLines.forEach((l, i) => {\n  const ours = l.includes(`at ${PKG}`) && !l.includes('$$');\n  if (i < 20 || ours || l.startsWith('Caused by')) kept.push(l);\n});\nconst stack = mask(kept.slice(0, 40).join('\\n'));\n\n// ---- 4. 우리 코드의 첫 프레임 → 파일 경로·라인\nconst frameRe = /at (com\\.example\\.alertlab\\.[\\w.$]+)\\.([\\w$<>]+)\\(([\\w$]+\\.java):(\\d+)\\)/;\nlet frame = null;\nfor (const l of stackLines) {\n  const m = l.match(frameRe);\n  if (m && !m[1].includes('$$')) {\n    const outerClass = m[1].split('$')[0];\n    frame = {\n      className: m[1],\n      method: m[2],\n      line: Number(m[4]),\n      path: `src/main/java/${outerClass.replace(/\\./g, '/')}.java`,\n    };\n    break;\n  }\n}\n\n// ---- 5. 배포 커밋 SHA 로 고정한 링크 (SHA 가 없으면 main)\nconst commitId = info?.git?.commit?.id;\nconst sha = (typeof commitId === 'string' ? commitId : commitId?.full) || 'main';\nconst code = frame\n  ? {\n      ...frame,\n      sha,\n      raw_url: `https://raw.githubusercontent.com/${OWNER}/${REPO}/${sha}/${frame.path}`,\n      permalink: `https://github.com/${OWNER}/${REPO}/blob/${sha}/${frame.path}#L${frame.line}`,\n    }\n  : null;\n\nreturn {\n  json: {\n    ...alert,\n    // 알럿 라벨에 error_type 이 없거나 부정확할 수 있으므로, 실제 로그에 기록된 값을 우선한다\n    error_type: log?.error_type || alert.error_type,\n    log: log && {\n      time: log['@timestamp'],\n      message: mask(log.message),\n      logger: log.logger_name,\n      traceId: log.traceId ?? null,\n      method: log.method ?? null,\n      requestURI: log.requestURI ?? null,\n      error_type: log.error_type ?? null,\n      stack,\n    },\n    log_count: entries.length,\n    code,\n  },\n};\n"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000011",
+      "name": "Fetch source (GitHub)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        200
+      ],
+      "parameters": {
+        "url": "={{ $json.code ? $json.code.raw_url : 'https://raw.githubusercontent.com/' + $env.GITHUB_OWNER + '/' + $env.GITHUB_REPO + '/HEAD/README.md' }}",
+        "options": {
+          "timeout": 5000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000012",
+      "name": "Build code snippet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// [Build code snippet] GitHub 에서 받은 소스(실패 시 로컬 마운트 소스)에서 ±15줄 추출\n// mode: runOnceForEachItem\nconst fs = require('fs');\n\nconst ctx = $('Extract error context').item.json;\nconst res = $json; // Fetch source 의 fullResponse: { statusCode, body }\nconst RADIUS = 15;\n\nif (!ctx.code) {\n  return { json: { ...ctx, code_snippet: null } };\n}\n\nlet source = null;\nlet from = null;\nif (res?.statusCode === 200 && typeof res.body === 'string') {\n  source = res.body;\n  from = 'github';\n} else {\n  // 아직 push 전이거나 SHA 가 GitHub 에 없을 때: compose 가 마운트한 로컬 src 사용\n  try {\n    source = fs.readFileSync(`/repo-src/${ctx.code.path.replace(/^src\\//, '')}`, 'utf8');\n    from = 'local';\n  } catch (e) {\n    source = null;\n  }\n}\n\nlet snippet = null;\nif (source) {\n  const lines = source.split('\\n');\n  const start = Math.max(1, ctx.code.line - RADIUS);\n  const end = Math.min(lines.length, ctx.code.line + RADIUS);\n  snippet = [];\n  for (let n = start; n <= end; n++) {\n    const marker = n === ctx.code.line ? '>>' : '  ';\n    snippet.push(`${marker} ${String(n).padStart(4)} | ${lines[n - 1].replace(/\\r$/, '')}`);\n  }\n  snippet = snippet.join('\\n');\n}\n\nreturn { json: { ...ctx, code_snippet: snippet, code_source: from } };\n"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000013",
+      "name": "DB error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2420,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-DB error?",
+              "leftValue": "={{ $json.error_type }}",
+              "rightValue": "db",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000014",
+      "name": "Diag: processlist",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        2640,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT ID, USER, DB, COMMAND, TIME, STATE, LEFT(INFO, 300) AS INFO FROM information_schema.PROCESSLIST WHERE COMMAND <> 'Sleep' AND USER NOT IN ('n8n_diag', 'event_scheduler') ORDER BY TIME DESC LIMIT 20",
+        "options": {}
+      },
+      "credentials": {
+        "mySql": {
+          "id": "mysqlDiagCred001",
+          "name": "MySQL diag (read-only)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000015",
+      "name": "Diag: innodb trx",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        2860,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT trx_id, trx_state, trx_started, TIMESTAMPDIFF(SECOND, trx_started, NOW()) AS age_sec, trx_rows_locked, trx_tables_locked, LEFT(trx_query, 300) AS trx_query FROM information_schema.innodb_trx ORDER BY trx_started LIMIT 20",
+        "options": {}
+      },
+      "credentials": {
+        "mySql": {
+          "id": "mysqlDiagCred001",
+          "name": "MySQL diag (read-only)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000016",
+      "name": "Diag: lock waits",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        3080,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT w.REQUESTING_ENGINE_TRANSACTION_ID AS waiting_trx, w.BLOCKING_ENGINE_TRANSACTION_ID AS blocking_trx, l.OBJECT_SCHEMA, l.OBJECT_NAME, l.INDEX_NAME, l.LOCK_MODE, l.LOCK_DATA FROM performance_schema.data_lock_waits w JOIN performance_schema.data_locks l ON l.ENGINE_LOCK_ID = w.BLOCKING_ENGINE_LOCK_ID LIMIT 20",
+        "options": {}
+      },
+      "credentials": {
+        "mySql": {
+          "id": "mysqlDiagCred001",
+          "name": "MySQL diag (read-only)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000017",
+      "name": "Diag: indexes",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        3300,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS columns FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = 'alertlab' GROUP BY TABLE_NAME, INDEX_NAME, NON_UNIQUE",
+        "options": {}
+      },
+      "credentials": {
+        "mySql": {
+          "id": "mysqlDiagCred001",
+          "name": "MySQL diag (read-only)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000018",
+      "name": "Diag: innodb status",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [
+        3520,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SHOW ENGINE INNODB STATUS",
+        "options": {}
+      },
+      "credentials": {
+        "mySql": {
+          "id": "mysqlDiagCred001",
+          "name": "MySQL diag (read-only)"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000019",
+      "name": "Summarize DB diagnostics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3740,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// [Summarize DB diagnostics] 진단 쿼리 결과를 LLM 입력용 텍스트로 요약\n// mode: runOnceForAllItems  (진단 결과는 DB 전체 상태라 알럿 수와 무관하게 한 번만 조회됨)\nconst rows = (name) =>\n  $(name)\n    .all()\n    .map((i) => i.json)\n    .filter((r) => r && Object.keys(r).length > 0);\n\nconst table = (title, list) =>\n  list.length === 0\n    ? `### ${title}\\n(없음)`\n    : `### ${title}\\n` + list.map((r) => '- ' + JSON.stringify(r)).join('\\n');\n\n// SHOW ENGINE INNODB STATUS 에서 최근 데드락 섹션만 추출\nconst statusText = rows('Diag: innodb status')[0]?.Status ?? '';\nconst m = statusText.match(/LATEST DETECTED DEADLOCK\\n-+\\n([\\s\\S]*?)\\n-{4,}\\n[A-Z ]+\\n-{4,}/);\nconst deadlock = m ? m[1].slice(0, 3000) : '(최근 감지된 데드락 없음)';\n\nconst summary = [\n  table('실행 중인 쿼리 (information_schema.PROCESSLIST, Sleep 제외)', rows('Diag: processlist')),\n  table('열린 트랜잭션 (information_schema.innodb_trx)', rows('Diag: innodb trx')),\n  table('락 대기 관계 (performance_schema.data_lock_waits)', rows('Diag: lock waits')),\n  table('인덱스 (alertlab 스키마)', rows('Diag: indexes')),\n  `### 최근 데드락 (SHOW ENGINE INNODB STATUS)\\n${deadlock}`,\n].join('\\n\\n');\n\nreturn $('Build code snippet')\n  .all()\n  .filter((i) => i.json.error_type === 'db')\n  .map((i) => ({ json: { ...i.json, db_diagnostics: summary } }));\n"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000020",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3960,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// [Build prompt] 시스템 프롬프트(파일) + 런북(파일) + 컨텍스트 → OpenAI 요청\n// mode: runOnceForEachItem\nconst fs = require('fs');\nconst ctx = $json;\n\nconst read = (path) => {\n  try {\n    return fs.readFileSync(path, 'utf8');\n  } catch (e) {\n    return null;\n  }\n};\n\nconst systemPrompt = (read('/prompts/alert-analysis.md') ?? '').replace(/<!--[\\s\\S]*?-->/g, '').trim();\nconst runbook = read(`/runbooks/${ctx.alertname}.md`);\nconst kst = (iso) => new Date(iso).toLocaleString('sv-SE', { timeZone: 'Asia/Seoul' }); // yyyy-MM-dd HH:mm:ss\n\nconst user = [\n  '## 알럿',\n  `- 알럿명: ${ctx.alertname}`,\n  `- severity: ${ctx.severity}`,\n  `- error_type: ${ctx.error_type}`,\n  `- 발생 시각(KST): ${kst(ctx.startsAt)}`,\n  `- summary: ${ctx.annotations.summary ?? ''}`,\n  `- description: ${ctx.annotations.description ?? ''}`,\n  '',\n  '## 에러 로그',\n  ctx.log\n    ? [\n        `- 로그 시각: ${ctx.log.time}`,\n        `- 요청: ${ctx.log.method ?? '-'} ${ctx.log.requestURI ?? '-'} (traceId=${ctx.log.traceId ?? '-'})`,\n        `- 메시지: ${ctx.log.message}`,\n        '- 스택트레이스(축약):',\n        '```',\n        ctx.log.stack,\n        '```',\n      ].join('\\n')\n    : '(알럿 시간대에 해당 에러 로그를 찾지 못함)',\n  '',\n  '## 관련 코드',\n  ctx.code_snippet\n    ? `${ctx.code.path}:${ctx.code.line} (${ctx.code.className}.${ctx.code.method})\\n\\`\\`\\`java\\n${ctx.code_snippet}\\n\\`\\`\\``\n    : '(없음)',\n  '',\n  '## DB 진단 결과',\n  ctx.db_diagnostics ?? '(DB 관련 알럿이 아니어서 조회하지 않음)',\n  '',\n  '## 런북',\n  runbook ?? '(없음)',\n].join('\\n');\n\n// 출력 구조를 강제하는 JSON 스키마 (Structured Outputs)\nconst schema = {\n  type: 'object',\n  additionalProperties: false,\n  required: ['error_time', 'probable_causes', 'related_code', 'db_findings', 'recommended_actions', 'summary'],\n  properties: {\n    error_time: { type: 'string', description: 'KST, yyyy-MM-dd HH:mm:ss' },\n    probable_causes: {\n      type: 'array',\n      items: {\n        type: 'object',\n        additionalProperties: false,\n        required: ['cause', 'confidence', 'evidence'],\n        properties: {\n          cause: { type: 'string' },\n          confidence: { type: 'string', enum: ['high', 'medium', 'low'] },\n          evidence: { type: 'string' },\n        },\n      },\n    },\n    related_code: {\n      type: 'object',\n      additionalProperties: false,\n      required: ['file', 'line', 'explanation'],\n      properties: {\n        file: { type: 'string' },\n        line: { type: 'integer' },\n        explanation: { type: 'string' },\n      },\n    },\n    db_findings: { type: 'string' },\n    recommended_actions: {\n      type: 'object',\n      additionalProperties: false,\n      required: ['immediate', 'permanent'],\n      properties: {\n        immediate: { type: 'array', items: { type: 'string' } },\n        permanent: { type: 'array', items: { type: 'string' } },\n      },\n    },\n    summary: { type: 'string' },\n  },\n};\n\nreturn {\n  json: {\n    ctx,\n    openai_request: {\n      model: $env.OPENAI_MODEL || 'gpt-4.1-mini',\n      max_completion_tokens: 1500,\n      response_format: { type: 'json_schema', json_schema: { name: 'alert_analysis', strict: true, schema } },\n      messages: [\n        { role: 'system', content: systemPrompt },\n        { role: 'user', content: user },\n      ],\n    },\n  },\n};\n"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000021",
+      "name": "OpenAI analyze",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4180,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.openai_request) }}",
+        "options": {
+          "timeout": 90000
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "openAiCred000001",
+          "name": "OpenAI"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000022",
+      "name": "Build Slack message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// [Build Slack message] LLM 분석 결과 + 컨텍스트 → Slack Block Kit\n// mode: runOnceForEachItem\nconst ctx = $('Build prompt').item.json.ctx;\nconst res = $json;\n\nlet ai = null;\nlet aiError = null;\ntry {\n  ai = JSON.parse(res.choices[0].message.content);\n} catch (e) {\n  aiError = res?.error?.message ?? 'LLM 응답을 해석하지 못했습니다.';\n}\n\nconst SEV = {\n  critical: { icon: '🔴', label: 'CRITICAL' },\n  major: { icon: '🟠', label: 'MAJOR' },\n  minor: { icon: '🟡', label: 'MINOR' },\n};\nconst CONF = { high: '🟢 high', medium: '🟡 medium', low: '⚪ low' };\nconst sev = SEV[ctx.severity] ?? SEV.minor;\nconst kst = (iso) => new Date(iso).toLocaleString('sv-SE', { timeZone: 'Asia/Seoul' }); // yyyy-MM-dd HH:mm:ss\nconst cut = (s, n = 2900) => (s && s.length > n ? s.slice(0, n) + '…' : s);\nconst section = (text) => ({ type: 'section', text: { type: 'mrkdwn', text: cut(text) } });\n\nconst blocks = [];\nblocks.push({\n  type: 'header',\n  text: { type: 'plain_text', text: `${sev.icon} [${sev.label}] ${ctx.alertname}`, emoji: true },\n});\nblocks.push(section(`*${ctx.annotations.summary ?? ''}*`));\nblocks.push({\n  type: 'section',\n  fields: [\n    { type: 'mrkdwn', text: `*🕐 에러 시간*\\n${ai?.error_time || kst(ctx.log?.time ?? ctx.startsAt)}` },\n    { type: 'mrkdwn', text: `*🏷️ 서비스 / 유형*\\n${ctx.service} / ${ctx.error_type}` },\n    { type: 'mrkdwn', text: `*🌐 요청*\\n${ctx.log ? `${ctx.log.method ?? '-'} ${ctx.log.requestURI ?? '-'}` : '-'}` },\n    { type: 'mrkdwn', text: `*🔎 traceId*\\n\\`${ctx.log?.traceId ?? '-'}\\`` },\n  ],\n});\nblocks.push({ type: 'divider' });\n\nif (ai) {\n  const causes = ai.probable_causes\n    .map((c, i) => `${i + 1}. *${c.cause}*  (${CONF[c.confidence] ?? c.confidence})\\n      ↳ 근거: ${c.evidence}`)\n    .join('\\n');\n  blocks.push(section(`*🧐 추정 원인*\\n${causes}`));\n} else {\n  blocks.push(section(`*⚠️ AI 분석 실패*\\n${aiError}\\n원본 로그: ${ctx.log?.message ?? '-'}`));\n}\n\nif (ctx.code) {\n  const link = `<${ctx.code.permalink}|${ctx.code.path.split('/').pop()}:${ctx.code.line}>`;\n  const around = (ctx.code_snippet ?? '')\n    .split('\\n')\n    .filter((l) => {\n      const n = Number(l.slice(2, 7));\n      return Math.abs(n - ctx.code.line) <= 4;\n    })\n    .join('\\n');\n  const explain = ai?.related_code?.explanation ? `\\n${ai.related_code.explanation}` : '';\n  blocks.push(section(`*💻 관련 코드* ${link} — \\`${ctx.code.method}()\\`${explain}${around ? `\\n\\`\\`\\`${around}\\`\\`\\`` : ''}`));\n}\n\nif (ctx.error_type === 'db' && ai?.db_findings) {\n  blocks.push(section(`*🗄️ DB 진단*\\n${ai.db_findings}`));\n}\n\nif (ai) {\n  const list = (arr) => (arr.length ? arr.map((s) => `• ${s}`).join('\\n') : '• -');\n  blocks.push(\n    section(\n      `*🛠️ 권장 조치*\\n*⚡ 즉시*\\n${list(ai.recommended_actions.immediate)}\\n*🔧 근본*\\n${list(ai.recommended_actions.permanent)}`,\n    ),\n  );\n  blocks.push(section(`*📝 분석 요약*\\n${ai.summary}`));\n}\n\nconst buttons = [];\nconst btn = (text, url) => url && buttons.push({ type: 'button', text: { type: 'plain_text', text, emoji: true }, url });\nbtn('📊 대시보드', ctx.annotations.dashboard_url);\nbtn('📜 로그 보기', ctx.annotations.grafana_explore_url);\nbtn('📘 런북', ctx.annotations.runbook_url);\nbtn('💻 코드', ctx.code?.permalink);\nif (buttons.length) blocks.push({ type: 'actions', elements: buttons });\n\nblocks.push({\n  type: 'context',\n  elements: [\n    {\n      type: 'mrkdwn',\n      text: `🤖 n8n alert-analyzer · ${$('Build prompt').item.json.openai_request.model} · 코드 출처: ${ctx.code_source ?? '-'} · 로그 ${ctx.log_count}건 조회`,\n    },\n  ],\n});\n\nconst mention = ctx.severity === 'critical' ? '<!here> ' : '';\nreturn {\n  json: {\n    slack: {\n      text: `${mention}${sev.icon} [${sev.label}] ${ctx.alertname} — ${ctx.annotations.summary ?? ''}`,\n      blocks,\n    },\n  },\n};\n"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000023",
+      "name": "Send to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4620,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.slack) }}",
+        "options": {
+          "timeout": 10000
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Grafana Alert Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize alerts": {
+      "main": [
+        [
+          {
+            "node": "Firing?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Firing?": {
+      "main": [
+        [
+          {
+            "node": "Check dedup",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build resolved message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build resolved message": {
+      "main": [
+        [
+          {
+            "node": "Send to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check dedup": {
+      "main": [
+        [
+          {
+            "node": "Not analyzed in 10m?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Not analyzed in 10m?": {
+      "main": [
+        [
+          {
+            "node": "Mark analyzed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark analyzed": {
+      "main": [
+        [
+          {
+            "node": "Query Loki",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Loki": {
+      "main": [
+        [
+          {
+            "node": "Get app info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get app info": {
+      "main": [
+        [
+          {
+            "node": "Extract error context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract error context": {
+      "main": [
+        [
+          {
+            "node": "Fetch source (GitHub)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch source (GitHub)": {
+      "main": [
+        [
+          {
+            "node": "Build code snippet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build code snippet": {
+      "main": [
+        [
+          {
+            "node": "DB error?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB error?": {
+      "main": [
+        [
+          {
+            "node": "Diag: processlist",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diag: processlist": {
+      "main": [
+        [
+          {
+            "node": "Diag: innodb trx",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diag: innodb trx": {
+      "main": [
+        [
+          {
+            "node": "Diag: lock waits",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diag: lock waits": {
+      "main": [
+        [
+          {
+            "node": "Diag: indexes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diag: indexes": {
+      "main": [
+        [
+          {
+            "node": "Diag: innodb status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diag: innodb status": {
+      "main": [
+        [
+          {
+            "node": "Summarize DB diagnostics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize DB diagnostics": {
+      "main": [
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "OpenAI analyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI analyze": {
+      "main": [
+        [
+          {
+            "node": "Build Slack message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Slack message": {
+      "main": [
+        [
+          {
+            "node": "Send to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Seoul"
+  },
+  "pinData": {}
+}

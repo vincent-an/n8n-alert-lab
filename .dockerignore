@@ -1,0 +1,9 @@
+build/
+bin/
+.gradle/
+logs/
+infra/
+n8n/
+docs/
+.env
+.idea/

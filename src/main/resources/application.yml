@@ -1,0 +1,34 @@
+spring:
+  application:
+    name: alertlab
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3307/alertlab?serverTimezone=Asia/Seoul}
+    username: ${DB_USERNAME:app}
+    password: ${DB_PASSWORD:app}
+    hikari:
+      # 커넥션 풀 고갈 시나리오를 쉽게 재현하기 위해 일부러 작게 잡음
+      maximum-pool-size: 3
+      connection-timeout: 2000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: update
+
+server:
+  error:
+    include-stacktrace: never
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  info:
+    git:
+      mode: full
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true

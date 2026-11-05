@@ -1,0 +1,196 @@
+# 알럿 규칙 — labels 는 n8n 라우팅 키, annotations 는 사람·LLM 을 위한 맥락
+# 주의: 템플릿에서는 $labels 대신 .Labels / .Values 문법을 쓴다 ($ 가 환경변수 치환과 섞이는 것을 방지)
+#       runbook_url 의 ${GITHUB_OWNER}/${GITHUB_REPO} 는 Grafana 가 치환하지 않으며,
+#       n8n "Normalize alerts" 노드가 컨테이너 환경변수로 채운다
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: alertlab
+    folder: alertlab
+    interval: 30s
+    rules:
+
+      # ---------------------------------------------------------- 🟡 minor
+      - uid: app-error-log
+        title: AppErrorLog
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        data:
+          - refId: A
+            datasourceUid: loki
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              refId: A
+              queryType: range
+              # 락/커넥션 풀 에러는 전용 critical 규칙이 담당하므로 제외 (중복 알림 방지)
+              expr: >-
+                sum by (error_type) (count_over_time({app="alertlab", level="ERROR"}
+                !~ "(?i)deadlock|lock wait timeout|Connection is not available" | json [5m]))
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions: [{ evaluator: { type: gt, params: [0] } }]
+        labels:
+          severity: minor
+          service: alertlab
+          team: backend
+        annotations:
+          summary: 애플리케이션 ERROR 로그 발생 (error_type={{ .Labels.error_type }})
+          description: 최근 5분간 alertlab 에서 ERROR 로그 {{ .Values.B.Value }}건이 발생했습니다.
+          runbook_url: https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/blob/main/docs/runbooks/AppErrorLog.md
+          dashboard_url: http://localhost:3000/d/alertlab-overview
+          grafana_explore_url: http://localhost:3000/explore?left=%7B%22datasource%22%3A%22loki%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bapp%3D%5C%22alertlab%5C%22%2C%20level%3D%5C%22ERROR%5C%22%7D%20%7C%20json%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-30m%22%2C%22to%22%3A%22now%22%7D%7D
+
+      # ---------------------------------------------------------- 🟠 major
+      - uid: app-error-burst
+        title: AppErrorBurst
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        data:
+          - refId: A
+            datasourceUid: loki
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              refId: A
+              queryType: range
+              expr: >-
+                sum by (error_type) (count_over_time({app="alertlab", level="ERROR"} | json [5m]))
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions: [{ evaluator: { type: gt, params: [9] } }]
+        labels:
+          severity: major
+          service: alertlab
+          team: backend
+        annotations:
+          summary: ERROR 로그 급증 (5분 내 {{ .Values.B.Value }}건)
+          description: 최근 5분간 ERROR 로그가 10건 이상 발생했습니다. 특정 엔드포인트 반복 실패 또는 장애 전파 가능성을 확인하세요.
+          runbook_url: https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/blob/main/docs/runbooks/AppErrorBurst.md
+          dashboard_url: http://localhost:3000/d/alertlab-overview
+          grafana_explore_url: http://localhost:3000/explore?left=%7B%22datasource%22%3A%22loki%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bapp%3D%5C%22alertlab%5C%22%2C%20level%3D%5C%22ERROR%5C%22%7D%20%7C%20json%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-30m%22%2C%22to%22%3A%22now%22%7D%7D
+
+      - uid: http-5xx-ratio
+        title: Http5xxRatio
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: OK
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              refId: A
+              expr: >-
+                sum(rate(http_server_requests_seconds_count{application="alertlab", status=~"5.."}[2m]))
+                / sum(rate(http_server_requests_seconds_count{application="alertlab"}[2m]))
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions: [{ evaluator: { type: gt, params: [0.05] } }]
+        labels:
+          severity: major
+          service: alertlab
+          team: backend
+          error_type: app
+        annotations:
+          summary: HTTP 5xx 비율 5% 초과
+          description: 최근 2분간 5xx 응답 비율이 5%를 넘는 상태가 2분 이상 지속되고 있습니다. (현재 비율 {{ .Values.B.Value }})
+          runbook_url: https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/blob/main/docs/runbooks/Http5xxRatio.md
+          dashboard_url: http://localhost:3000/d/alertlab-overview
+
+      # ---------------------------------------------------------- 🔴 critical
+      - uid: hikari-pending
+        title: HikariPending
+        condition: C
+        for: 1m
+        noDataState: OK
+        execErrState: OK
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              refId: A
+              expr: max_over_time(hikaricp_connections_pending{application="alertlab"}[2m])
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions: [{ evaluator: { type: gt, params: [0] } }]
+        labels:
+          severity: critical
+          service: alertlab
+          team: backend
+          error_type: db
+        annotations:
+          summary: DB 커넥션 풀 대기 발생 (pending={{ .Values.B.Value }})
+          description: HikariCP 에서 커넥션을 기다리는 스레드가 1분 이상 존재합니다. 커넥션 점유가 긴 쿼리·트랜잭션 또는 풀 크기 부족을 확인하세요.
+          runbook_url: https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/blob/main/docs/runbooks/HikariPending.md
+          dashboard_url: http://localhost:3000/d/alertlab-overview
+
+      - uid: db-lock-contention
+        title: DbLockContention
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: OK
+        data:
+          - refId: A
+            datasourceUid: loki
+            relativeTimeRange: { from: 300, to: 0 }
+            model:
+              refId: A
+              queryType: range
+              expr: >-
+                sum(count_over_time({app="alertlab", level="ERROR"} |~ "(?i)deadlock|lock wait timeout" [5m]))
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions: [{ evaluator: { type: gt, params: [0] } }]
+        labels:
+          severity: critical
+          service: alertlab
+          team: backend
+          error_type: db
+        annotations:
+          summary: DB 데드락 / 락 대기 타임아웃 발생
+          description: 최근 5분간 데드락 또는 Lock wait timeout 에러가 {{ .Values.B.Value }}건 발생했습니다.
+          runbook_url: https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/blob/main/docs/runbooks/DbLockContention.md
+          dashboard_url: http://localhost:3000/d/alertlab-overview
+          grafana_explore_url: http://localhost:3000/explore?left=%7B%22datasource%22%3A%22loki%22%2C%22queries%22%3A%5B%7B%22refId%22%3A%22A%22%2C%22expr%22%3A%22%7Bapp%3D%5C%22alertlab%5C%22%2C%20level%3D%5C%22ERROR%5C%22%7D%20%7C%20json%22%7D%5D%2C%22range%22%3A%7B%22from%22%3A%22now-30m%22%2C%22to%22%3A%22now%22%7D%7D

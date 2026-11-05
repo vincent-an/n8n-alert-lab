@@ -1,0 +1,68 @@
+{
+  "uid": "alertlab-overview",
+  "title": "n8n-alert-lab",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "HTTP 요청 수 (status 별, req/s)",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "refId": "A", "legendFormat": "{{status}} {{uri}}",
+        "expr": "sum by (status, uri) (rate(http_server_requests_seconds_count{application=\"alertlab\", uri!~\"/actuator.*\"}[1m]))" }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "5xx 비율 (2m)",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit",
+        "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.05 } ] } } },
+      "targets": [{ "refId": "A",
+        "expr": "sum(rate(http_server_requests_seconds_count{application=\"alertlab\", status=~\"5..\"}[2m])) / sum(rate(http_server_requests_seconds_count{application=\"alertlab\"}[2m]))" }]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "p95 응답시간",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [{ "refId": "A", "legendFormat": "{{uri}}",
+        "expr": "histogram_quantile(0.95, sum by (le, uri) (rate(http_server_requests_seconds_bucket{application=\"alertlab\", uri!~\"/actuator.*\"}[1m])))" }]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "HikariCP 커넥션 (active / idle / pending)",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "legendFormat": "active",  "expr": "hikaricp_connections_active{application=\"alertlab\"}" },
+        { "refId": "B", "legendFormat": "idle",    "expr": "hikaricp_connections_idle{application=\"alertlab\"}" },
+        { "refId": "C", "legendFormat": "pending", "expr": "hikaricp_connections_pending{application=\"alertlab\"}" },
+        { "refId": "D", "legendFormat": "max",     "expr": "hikaricp_connections_max{application=\"alertlab\"}" }
+      ]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "JVM Heap 사용량",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "targets": [{ "refId": "A", "legendFormat": "{{id}}",
+        "expr": "sum by (id) (jvm_memory_used_bytes{application=\"alertlab\", area=\"heap\"})" }]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "ERROR 로그 건수 (error_type 별, 1m)",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [{ "refId": "A", "legendFormat": "{{error_type}}",
+        "expr": "sum by (error_type) (count_over_time({app=\"alertlab\", level=\"ERROR\"} | json [1m]))" }]
+    },
+    {
+      "id": 7, "type": "logs", "title": "ERROR 로그",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "datasource": { "type": "loki", "uid": "loki" },
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" },
+      "targets": [{ "refId": "A",
+        "expr": "{app=\"alertlab\", level=\"ERROR\"} | json | line_format \"[{{.error_type}}] traceId={{.traceId}} {{.method}} {{.requestURI}} - {{.message}}\"" }]
+    }
+  ]
+}

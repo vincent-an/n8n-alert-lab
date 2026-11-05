@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    14_Monitoring/module01-actuator 의 logback-spring.xml 을 베이스로 확장
+    - CONSOLE / FILE : 사람이 읽는 텍스트 로그 (기존 패턴 유지 + method, requestURI)
+    - JSON_FILE      : Alloy 가 수집해 Loki 로 보내는 JSON 한 줄 로그
+                       스택트레이스가 한 줄(stack_trace 필드)에 담겨 n8n 이 온전히 받을 수 있다
+-->
+<configuration>
+
+    <springProperty name="APP_NAME" source="spring.application.name"/>
+
+    <property name="LOG_PATH" value="${LOG_PATH:-./logs}"/>
+
+    <property name="LOG_PATTERN"
+              value="%d{yyyy-MM-dd HH:mm:ss} [%level][${APP_NAME}] [%thread] traceId=%X{traceId:-} [%X{method:-} %X{requestURI:-}] %logger{36} - %msg%n"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/${APP_NAME}.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/${APP_NAME}.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>7</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <pattern>${LOG_PATTERN}</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
+    <appender name="JSON_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_PATH}/${APP_NAME}.json</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>${LOG_PATH}/${APP_NAME}.%d{yyyy-MM-dd}.json.gz</fileNamePattern>
+            <maxHistory>7</maxHistory>
+        </rollingPolicy>
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <customFields>{"app":"${APP_NAME}"}</customFields>
+            <includeMdcKeyName>traceId</includeMdcKeyName>
+            <includeMdcKeyName>method</includeMdcKeyName>
+            <includeMdcKeyName>requestURI</includeMdcKeyName>
+            <includeMdcKeyName>error_type</includeMdcKeyName>
+            <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+                <maxDepthPerThrowable>40</maxDepthPerThrowable>
+                <maxLength>8192</maxLength>
+                <rootCauseFirst>false</rootCauseFirst>
+            </throwableConverter>
+        </encoder>
+    </appender>
+
+    <!-- Hibernate 가 SQL 예외를 스택 없이 ERROR 로 한 번 더 찍는 것을 막는다.
+         예외는 GlobalExceptionHandler 가 스택과 함께 한 번만 기록 → 알럿 건수·n8n 입력이 정확해짐 -->
+    <logger name="org.hibernate.engine.jdbc.spi.SqlExceptionHelper" level="OFF"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+        <appender-ref ref="JSON_FILE"/>
+    </root>
+
+</configuration>

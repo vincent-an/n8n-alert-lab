@@ -1,0 +1,41 @@
+// 앱 JSON 로그 파일 tail → 라벨(app, level) 부착 → Loki push
+// Promtail 의 scrape_configs + pipeline_stages 와 같은 역할
+
+local.file_match "app" {
+  path_targets = [{
+    __path__ = "/var/log/app/*.json",
+    app      = "alertlab",
+  }]
+}
+
+loki.source.file "app" {
+  targets    = local.file_match.app.targets
+  forward_to = [loki.process.app.receiver]
+}
+
+loki.process "app" {
+  stage.json {
+    expressions = {
+      level     = "level",
+      timestamp = "\"@timestamp\"",
+    }
+  }
+
+  // 카디널리티가 낮은 값만 라벨로. traceId·error_type 등은 쿼리 시 | json 으로 추출
+  stage.labels {
+    values = { level = "" }
+  }
+
+  stage.timestamp {
+    source = "timestamp"
+    format = "RFC3339Nano"
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

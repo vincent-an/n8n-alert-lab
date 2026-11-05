@@ -1,0 +1,168 @@
+name: n8n-alert-lab
+
+services:
+
+  # ---------------------------------------------------------------- app
+  app:
+    build: .
+    container_name: alertlab-app
+    restart: on-failure
+    ports:
+      - "8080:8080"
+    environment:
+      DB_URL: jdbc:mysql://mysql:3306/alertlab?serverTimezone=Asia/Seoul
+      DB_USERNAME: app
+      DB_PASSWORD: ${APP_DB_PASSWORD}
+    volumes:
+      - app-logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health || curl -fs http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+  # ---------------------------------------------------------------- mysql
+  mysql:
+    image: mysql:8.4
+    container_name: alertlab-mysql
+    ports:
+      - "3307:3306"   # 로컬 MySQL(3306) 과 충돌 방지
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      DIAG_DB_PASSWORD: ${DIAG_DB_PASSWORD}
+      OPS_DB_PASSWORD: ${OPS_DB_PASSWORD}
+      TZ: Asia/Seoul
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./infra/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # ---------------------------------------------------------------- metrics
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    container_name: alertlab-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------- logs
+  loki:
+    image: grafana/loki:3.7.9
+    container_name: alertlab-loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./infra/loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    # Loki 이미지는 distroless 라 wget/curl 이 없어 컨테이너 내부 헬스체크를 두지 않는다.
+    # 상태 확인: curl http://localhost:3100/ready
+
+  alloy:
+    image: grafana/alloy:v1.21.3
+    container_name: alertlab-alloy
+    ports:
+      - "12345:12345"
+    command: run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/var/lib/alloy/data /etc/alloy/config.alloy
+    volumes:
+      - ./infra/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - app-logs:/var/log/app:ro
+      - alloy-data:/var/lib/alloy/data
+    depends_on:
+      - loki
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/12345 && printf \"GET /-/ready HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q 200 <&3'"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------- grafana
+  grafana:
+    image: grafana/grafana:13.2.5
+    container_name: alertlab-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD}
+      GF_SERVER_ROOT_URL: http://localhost:3000
+      GITHUB_OWNER: ${GITHUB_OWNER}
+      GITHUB_REPO: ${GITHUB_REPO}
+      TZ: Asia/Seoul
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------- n8n
+  n8n:
+    image: n8nio/n8n:2.46.6
+    container_name: alertlab-n8n
+    ports:
+      - "5678:5678"
+    entrypoint: ["/bin/sh", "/init/n8n-init.sh"]
+    environment:
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      GENERIC_TIMEZONE: Asia/Seoul
+      TZ: Asia/Seoul
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      # Code 노드에서 $env, fs(프롬프트·런북 파일 읽기) 사용 허용 — 로컬 실습 전용 설정
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      NODE_FUNCTION_ALLOW_BUILTIN: fs
+      # 워크플로가 참조하는 값 (워크플로 JSON 에 비밀값을 하드코딩하지 않기 위함)
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      OPENAI_MODEL: ${OPENAI_MODEL}
+      GITHUB_OWNER: ${GITHUB_OWNER}
+      GITHUB_REPO: ${GITHUB_REPO}
+      # 최초 1회 크리덴셜 import 용 (n8n 이 N8N_ENCRYPTION_KEY 로 암호화해 저장)
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DIAG_DB_PASSWORD: ${DIAG_DB_PASSWORD}
+      OPS_DB_PASSWORD: ${OPS_DB_PASSWORD}
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./n8n/init:/init:ro
+      - ./n8n/workflows:/workflows:ro
+      - ./n8n/prompts:/prompts:ro
+      - ./docs/runbooks:/runbooks:ro
+      - ./src:/repo-src:ro   # GitHub 에 아직 push 전일 때 코드 스니펫 fallback
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  app-logs:
+  mysql-data:
+  prometheus-data:
+  loki-data:
+  alloy-data:
+  grafana-data:
+  n8n-data:

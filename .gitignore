@@ -1,0 +1,11 @@
+.gradle/
+build/
+bin/
+out/
+logs/
+.idea/
+*.iml
+.vscode/
+
+# 비밀값 — 절대 커밋 금지
+.env
