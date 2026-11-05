@@ -25,6 +25,8 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'io.micrometer:micrometer-registry-prometheus'
     implementation 'net.logstash.logback:logstash-logback-encoder:8.1'
+    // Swagger UI — Boot 3.5 는 springdoc 2.8.x (3.x 는 Boot 4 용)
+    implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.17'
     runtimeOnly 'com.mysql:mysql-connector-j'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

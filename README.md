@@ -18,6 +18,7 @@ Sentry 가 하는 일(스택트레이스 + 소스 컨텍스트 + 커밋 연결 +
 | 구성 | 주소 | 비고 |
 |---|---|---|
 | app (Spring Boot 3.5 / Java 21) | http://localhost:8080 | `/scenarios/*` 에러 재현 |
+| Swagger UI | http://localhost:8080/swagger-ui.html | 시나리오별 예외·알럿·응답 예시 문서화 |
 | Grafana 13 | http://localhost:3000 | admin / `.env` 의 `GF_ADMIN_PASSWORD` |
 | n8n 2.x | http://localhost:5678 | 첫 접속 시 owner 계정 생성 |
 | Prometheus | http://localhost:9090 | |
@@ -68,6 +69,7 @@ curl -X POST localhost:8080/scenarios/pool-exhaustion  # 4. 커넥션 풀 고갈
 curl -X POST localhost:8080/scenarios/deadlock         # 5. 데드락 (db)
 ```
 > PowerShell 에서는 `curl.exe -X POST ...` 또는 `Invoke-RestMethod -Method Post ...`
+> Swagger UI 의 **Try it out** 으로 호출해도 된다. 응답의 `traceId` 로 Loki 에서 같은 요청 로그를 찾을 수 있다.
 
 | 알럿 규칙 | 조건 | severity | 주로 잡히는 시나리오 |
 |---|---|---|---|
