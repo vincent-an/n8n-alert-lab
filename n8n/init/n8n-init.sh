@@ -12,8 +12,8 @@ cat > "$CREDS" <<EOF
    "data":{"host":"mysql","port":3306,"database":"alertlab","user":"n8n_diag","password":"${DIAG_DB_PASSWORD}"}},
   {"id":"mysqlOpsCred0001","name":"MySQL ops","type":"mySql",
    "data":{"host":"mysql","port":3306,"database":"ops","user":"n8n_ops","password":"${OPS_DB_PASSWORD}"}},
-  {"id":"openAiCred000001","name":"OpenAI","type":"openAiApi",
-   "data":{"apiKey":"${OPENAI_API_KEY}"}}
+  {"id":"llmApiCred000001","name":"LLM API (Bearer)","type":"httpHeaderAuth",
+   "data":{"name":"Authorization","value":"Bearer ${LLM_API_KEY}"}}
 ]
 EOF
 echo "[init] importing credentials from environment"

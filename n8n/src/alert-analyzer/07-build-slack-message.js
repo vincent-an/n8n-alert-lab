@@ -88,7 +88,7 @@ blocks.push({
   elements: [
     {
       type: 'mrkdwn',
-      text: `🤖 n8n alert-analyzer · ${$('Build prompt').item.json.openai_request.model} · 코드 출처: ${ctx.code_source ?? '-'} · 로그 ${ctx.log_count}건 조회`,
+      text: `🤖 n8n alert-analyzer · ${$('Build prompt').item.json.llm_request.model} · 코드 출처: ${ctx.code_source ?? '-'} · 로그 ${ctx.log_count}건 조회`,
     },
   ],
 });
