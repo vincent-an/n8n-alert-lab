@@ -121,6 +121,56 @@ docker compose restart n8n
 - **slow-query 가 `SLEEP()` 이 아닌 이유**: `SLEEP()` 은 타임아웃으로 중단돼도 에러 없이 1 을 반환해서 재현이 안 됨 → `MAX_EXECUTION_TIME` 힌트로 무거운 쿼리를 끊는다
 - **처음부터 다시**: `docker compose down -v` (DB·로그·n8n 데이터 모두 삭제)
 
+## 7. PR 셀프 리뷰 봇 `pr-reviewer` (2단계)
+PR 을 열거나 push 하면 GitHub App 웹훅 → ngrok → n8n 이 diff 를 LLM 으로 리뷰해서
+`봇이름[bot]` 으로 PR 에 코멘트를 단다. 치명적 이슈가 있으면 Slack 에 한 줄 요약도 보낸다.
+
+```
+GitHub App 웹훅 ─▶ ngrok (POST /webhook/github-pr 만 통과) ─▶ n8n
+  서명 검증(HMAC) → 즉시 응답(401/202) → 대상 필터 → 커밋 중복 확인·선점
+  → App JWT → 설치 토큰 → PR 파일 조회 → diff 정리(제외·800줄 예산)
+  → 리뷰 기준(docs/review-guide.md) + diff → LLM 리뷰(JSON) → PR 코멘트 → (치명적) Slack
+```
+
+### 준비
+1. **ngrok**: https://dashboard.ngrok.com 에서 Authtoken 과 무료 dev domain 확인 → `.env` 의 `NGROK_AUTHTOKEN`, `NGROK_DOMAIN`
+2. **웹훅 secret**: 랜덤 문자열을 `.env` 의 `GITHUB_WEBHOOK_SECRET` 에 넣는다
+3. **GitHub App** (Settings → Developer settings → GitHub Apps → New)
+   - Webhook URL: `https://<NGROK_DOMAIN>/webhook/github-pr`, Secret: 2번 값
+   - Repository permissions: Contents `Read-only`, Pull requests `Read and write`
+   - Subscribe to events: `Pull request`
+   - 만든 뒤 App ID → `.env` 의 `GITHUB_APP_ID`, Credentials → Key pairs → New key 로 받은 `.pem` → `secrets/github-app.pem`
+   - Install App → 대상 리포만 선택해서 설치
+4. 터널 켜기 (테스트할 때만)
+   ```bash
+   docker compose --profile tunnel up -d ngrok
+   ```
+
+### 설정
+| 변수 | 의미 |
+|---|---|
+| `REVIEW_ALLOWED_ASSOCIATIONS` | 리뷰할 작성자의 리포 관계. 개인 `OWNER`, 팀 `OWNER,MEMBER,COLLABORATOR` |
+| `REVIEW_REASONING_EFFORT` | 코드 리뷰용 추론 강도 (기본 `low`) |
+
+- 리뷰 기준을 바꾸려면 `docs/review-guide.md` 만 고친다 (n8n 이 로컬 마운트에서 읽으므로 PR 이 자기 기준을 바꿀 수 없다)
+- fork PR, Draft PR, 허용되지 않은 작성자는 리뷰하지 않는다
+- 같은 커밋에는 코멘트 1개 (`ops.pr_review`). 새 커밋을 push 하면 다시 리뷰한다
+
+### 보안 메모
+- ngrok 트래픽 정책(`infra/ngrok/traffic-policy.yml`)으로 n8n 화면·다른 웹훅은 외부에서 404
+- GitHub 설치 토큰(1시간, 이 리포 PR 권한만)이 n8n 실행 기록에 남는다. 팀에 적용할 때는 실행 기록 보관을 줄일 것
+- Gemini 무료 등급 입력은 모델 개선에 쓰일 수 있다. 회사 코드에는 유료 등급이나 승인된 제공자를 쓸 것
+
+### 완료 기준 체크리스트 (2단계)
+- [ ] PR 열기·push 시 `봇이름[bot]` 으로 커밋당 코멘트 1개
+- [ ] GitHub App 웹훅 전송 기록(Advanced → Recent Deliveries) 실패 0건
+- [ ] 서명이 틀린 요청은 401
+- [ ] fork / 허용되지 않은 작성자 / Draft PR 은 리뷰하지 않음
+- [ ] diff 가 잘리면 "일부만 리뷰했어요" 와 제외 파일 목록 표시
+- [ ] 문제를 심은 테스트 PR 에서 절반 이상 탐지
+- [ ] 치명적 이슈가 있으면 Slack 요약
+
 ## 다음 단계
 - 1.5단계: Slack Bot Token + firing/resolved 스레드 묶기 (`ops.alert_thread` 준비됨)
-- 2단계: GitHub PR 웹훅 → 셀프 코드리뷰 AI → PR 코멘트
+- 리뷰 봇 튜닝: 트랜잭션 경계 탐지 보강, 추론 강도 비교 측정
+- 리뷰 봇 2차: 인라인 리뷰 코멘트 (findings 의 file/line 활용)

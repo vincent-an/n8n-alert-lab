@@ -34,5 +34,17 @@ CREATE TABLE IF NOT EXISTS ops.alert_thread (
     created_at  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 2단계(PR 셀프 리뷰): 같은 커밋에 리뷰 코멘트가 두 번 달리지 않게 기록
+CREATE TABLE IF NOT EXISTS ops.pr_review (
+    repo        VARCHAR(200) NOT NULL,
+    pr_number   INT          NOT NULL,
+    head_sha    CHAR(40)     NOT NULL,
+    status      VARCHAR(20)  NOT NULL,          -- reviewing | commented
+    comment_url VARCHAR(500) NULL,
+    created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (repo, pr_number, head_sha)
+);
+
 FLUSH PRIVILEGES;
 SQL
