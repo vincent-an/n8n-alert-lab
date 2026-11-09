@@ -152,7 +152,7 @@ GitHub App 웹훅 ─▶ ngrok (POST /webhook/github-pr 만 통과) ─▶ n8n
 | 변수 | 의미 |
 |---|---|
 | `REVIEW_ALLOWED_ASSOCIATIONS` | 리뷰할 작성자의 리포 관계. 개인 `OWNER`, 팀 `OWNER,MEMBER,COLLABORATOR` |
-| `REVIEW_REASONING_EFFORT` | 코드 리뷰용 추론 강도 (기본 `low`) |
+| `REVIEW_REASONING_EFFORT` | 코드 리뷰용 추론 강도 (기본 `medium`. 문제를 심은 테스트 PR 기준 low 10.3/12 → medium 11/12) |
 
 - 리뷰 기준을 바꾸려면 `docs/review-guide.md` 만 고친다 (n8n 이 로컬 마운트에서 읽으므로 PR 이 자기 기준을 바꿀 수 없다)
 - fork PR, Draft PR, 허용되지 않은 작성자는 리뷰하지 않는다
