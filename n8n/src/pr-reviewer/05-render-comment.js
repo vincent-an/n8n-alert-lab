@@ -50,6 +50,7 @@ if (!review) {
       out.push('');
       out.push(`**[${sev}] ${f.title}**`);
       out.push(`- 위치: ${lineLink(f)} · 분류: ${f.category}`);
+      if (f.evidence) out.push(`- 근거 코드: \`${String(f.evidence).trim().replace(/`/g, "'")}\``);
       out.push(`- 이유: ${f.reason}`);
       out.push(`- 개선 방향: ${f.suggestion}`);
     }
