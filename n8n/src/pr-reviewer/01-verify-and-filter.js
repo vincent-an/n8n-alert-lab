@@ -24,8 +24,11 @@ if (!secret) return result(500, 'GITHUB_WEBHOOK_SECRET is not configured');
 
 const raw = await this.helpers.getBinaryDataBuffer(0, 'data');
 const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');
-const valid =
-  signature.length === expected.length && crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+// 글자 수가 아니라 "바이트 수" 를 비교해야 한다. 서명 헤더에 멀티바이트 문자가 섞이면 글자 수는 같아도
+// 바이트 수가 달라져서 timingSafeEqual 이 예외를 던지고, 401 대신 500 이 된다.
+const received = Buffer.from(signature, 'utf8');
+const wanted = Buffer.from(expected, 'utf8');
+const valid = received.length === wanted.length && crypto.timingSafeEqual(received, wanted);
 if (!valid) return result(401, 'invalid signature');
 
 // ---- 2. 이벤트 종류 (App 은 구독하지 않은 installation 이벤트도 받는다)
