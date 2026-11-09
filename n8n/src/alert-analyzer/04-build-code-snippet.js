@@ -3,7 +3,7 @@
 const fs = require('fs');
 
 const ctx = $('Extract error context').item.json;
-const res = $json; // Fetch source 의 fullResponse: { statusCode, body }
+const res = $json; // Fetch source 의 fullResponse (responseFormat=text): { statusCode, headers, data }
 const RADIUS = 15;
 
 if (!ctx.code) {
@@ -12,8 +12,9 @@ if (!ctx.code) {
 
 let source = null;
 let from = null;
-if (res?.statusCode === 200 && typeof res.body === 'string') {
-  source = res.body;
+const body = typeof res?.data === 'string' ? res.data : res?.body;
+if (res?.statusCode === 200 && typeof body === 'string') {
+  source = body;
   from = 'github';
 } else {
   // 아직 push 전이거나 SHA 가 GitHub 에 없을 때: compose 가 마운트한 로컬 src 사용

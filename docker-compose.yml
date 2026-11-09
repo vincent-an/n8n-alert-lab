@@ -134,11 +134,13 @@ services:
       NODE_FUNCTION_ALLOW_BUILTIN: fs
       # 워크플로가 참조하는 값 (워크플로 JSON 에 비밀값을 하드코딩하지 않기 위함)
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
-      OPENAI_MODEL: ${OPENAI_MODEL}
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_MODEL: ${LLM_MODEL}
+      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-}
       GITHUB_OWNER: ${GITHUB_OWNER}
       GITHUB_REPO: ${GITHUB_REPO}
-      # 최초 1회 크리덴셜 import 용 (n8n 이 N8N_ENCRYPTION_KEY 로 암호화해 저장)
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # 크리덴셜 import 용 (n8n 이 N8N_ENCRYPTION_KEY 로 암호화해 저장)
+      LLM_API_KEY: ${LLM_API_KEY}
       DIAG_DB_PASSWORD: ${DIAG_DB_PASSWORD}
       OPS_DB_PASSWORD: ${OPS_DB_PASSWORD}
     volumes:

@@ -1,4 +1,4 @@
-// [Build prompt] 시스템 프롬프트(파일) + 런북(파일) + 컨텍스트 → OpenAI 요청
+// [Build prompt] 시스템 프롬프트(파일) + 런북(파일) + 컨텍스트 → LLM 요청 (OpenAI 호환 Chat Completions)
 // mode: runOnceForEachItem
 const fs = require('fs');
 const ctx = $json;
@@ -93,12 +93,16 @@ const schema = {
   },
 };
 
+const effort = $env.LLM_REASONING_EFFORT;
+
 return {
   json: {
     ctx,
-    openai_request: {
-      model: $env.OPENAI_MODEL || 'gpt-4.1-mini',
-      max_completion_tokens: 1500,
+    llm_request: {
+      model: $env.LLM_MODEL,
+      // 추론 모델은 추론 토큰도 이 상한에 포함된다
+      max_completion_tokens: 4000,
+      ...(effort ? { reasoning_effort: effort } : {}),
       response_format: { type: 'json_schema', json_schema: { name: 'alert_analysis', strict: true, schema } },
       messages: [
         { role: 'system', content: systemPrompt },

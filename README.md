@@ -1,6 +1,6 @@
 # n8n-alert-lab
 
-에러가 나면 **Grafana 알럿 → n8n → (로그·코드·DB 진단 수집) → OpenAI 분석 → Slack** 으로
+에러가 나면 **Grafana 알럿 → n8n → (로그·코드·DB 진단 수집) → LLM 분석 → Slack** 으로
 "에러 시간 / 추정 원인 / 관련 코드 / 권장 조치 / 분석 요약" 을 받아보는 실습 프로젝트.
 Sentry 가 하는 일(스택트레이스 + 소스 컨텍스트 + 커밋 연결 + 알림)을 직접 파이프라인으로 만들고,
 여기에 LLM 원인 분석과 DB 실시간 진단을 더한다.
@@ -10,7 +10,7 @@ Sentry 가 하는 일(스택트레이스 + 소스 컨텍스트 + 커밋 연결 +
      │  ▲                                              ├──▶ Grafana (대시보드·알럿 규칙)
      │  └──── scrape ──── Prometheus ──────────────────┘          │ webhook
      ▼                                                            ▼
-   MySQL ◀── 읽기 전용 진단 쿼리 ─────────────────────────────  n8n ──▶ OpenAI
+   MySQL ◀── 읽기 전용 진단 쿼리 ─────────────────────────────  n8n ──▶ LLM (Gemini 등)
  (alertlab / ops)                         GitHub raw(코드) ◀──┤
                                                               └──▶ Slack
 ```
@@ -36,7 +36,10 @@ cp .env.example .env
 ```
 - `GITHUB_OWNER` : 내 GitHub 아이디 (코드·런북 링크용)
 - `SLACK_WEBHOOK_URL` : Slack 앱 → *Incoming Webhooks* 활성화 → 채널 선택 후 발급된 URL
-- `OPENAI_API_KEY` : OpenAI API 키 / `OPENAI_MODEL` 기본 `gpt-4.1-mini`
+- `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL` / `LLM_REASONING_EFFORT` : **OpenAI 호환** Chat Completions API 설정
+  - 기본값은 Google Gemini (AI Studio 에서 무료 등급 키 발급 가능, `gemini-3.5-flash`)
+  - OpenAI 등 다른 제공자로 바꿀 때는 이 4줄만 교체 (`.env.example` 의 예시 참고)
+  - 변수 이름을 `OPENAI_*` 로 두지 않는 이유: PC 환경변수에 같은 이름이 있으면 docker compose 가 `.env` 보다 우선 적용한다
 - 나머지 비밀번호·`N8N_ENCRYPTION_KEY` 는 아무 랜덤 문자열
 
 > `.env` 는 `.gitignore` 대상. 워크플로 JSON 에는 비밀값이 없고 `$env` / n8n Credential 로만 참조한다.
@@ -89,7 +92,7 @@ Webhook → Normalize alerts → Firing?
             ├─ db  → Diag ×5(processlist / innodb_trx / lock waits /        │
             │        indexes / INNODB STATUS) → Summarize DB diagnostics ─┐ │
             └─ app ───────────────────────────────────────────────────────┤ │
-       → Build prompt → OpenAI analyze(JSON 스키마 강제) → Build Slack message → Send to Slack
+       → Build prompt → LLM analyze(JSON 스키마 강제, 실패 시 3회 재시도) → Build Slack message → Send to Slack
 ```
 - **프롬프트 수정**: `n8n/prompts/alert-analysis.md` 를 고치면 다음 실행부터 바로 반영(재import 불필요)
 - **런북**: `docs/runbooks/<알럿명>.md` — Slack 버튼 링크 + LLM 입력으로 함께 사용

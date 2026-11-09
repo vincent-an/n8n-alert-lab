@@ -12,7 +12,8 @@ const src = (p) => readFileSync(join(root, 'src', p), 'utf8');
 const CRED = {
   diag: { mySql: { id: 'mysqlDiagCred001', name: 'MySQL diag (read-only)' } },
   ops: { mySql: { id: 'mysqlOpsCred0001', name: 'MySQL ops' } },
-  openai: { openAiApi: { id: 'openAiCred000001', name: 'OpenAI' } },
+  // OpenAI 호환 API 공통: Authorization: Bearer <LLM_API_KEY>
+  llm: { httpHeaderAuth: { id: 'llmApiCred000001', name: 'LLM API (Bearer)' } },
 };
 
 let seq = 0;
@@ -144,16 +145,24 @@ const alertNodes = [
   code('Summarize DB diagnostics', [3740, 0], D + '05-summarize-db-diagnostics.js', 'runOnceForAllItems'),
 
   code('Build prompt', [3960, 200], D + '06-build-prompt.js'),
-  node('OpenAI analyze', 'n8n-nodes-base.httpRequest', 4.2, [4180, 200], {
+  // OpenAI 호환 Chat Completions — 제공자는 LLM_BASE_URL / LLM_MODEL 환경변수로 교체
+  node('LLM analyze', 'n8n-nodes-base.httpRequest', 4.2, [4180, 200], {
     method: 'POST',
-    url: 'https://api.openai.com/v1/chat/completions',
-    authentication: 'predefinedCredentialType',
-    nodeCredentialType: 'openAiApi',
+    url: '={{ $env.LLM_BASE_URL }}/chat/completions',
+    authentication: 'genericCredentialType',
+    genericAuthType: 'httpHeaderAuth',
     sendBody: true,
     specifyBody: 'json',
-    jsonBody: '={{ JSON.stringify($json.openai_request) }}',
+    jsonBody: '={{ JSON.stringify($json.llm_request) }}',
     options: { timeout: 90000 },
-  }, { credentials: CRED.openai, onError: 'continueRegularOutput' }),
+  }, {
+    credentials: CRED.llm,
+    // 무료 등급은 일시적 혼잡(503)·한도 초과(429)가 잦으므로 재시도
+    retryOnFail: true,
+    maxTries: 3,
+    waitBetweenTries: 5000,
+    onError: 'continueRegularOutput',
+  }),
   code('Build Slack message', [4400, 200], D + '07-build-slack-message.js'),
 
   node('Send to Slack', 'n8n-nodes-base.httpRequest', 4.2, [4620, 400], {
@@ -168,7 +177,7 @@ const alertNodes = [
 
 const alertWorkflow = {
   id: 'alertAnalyzer001',
-  name: 'alert-analyzer (Grafana → AI 분석 → Slack)',
+  name: 'alert-analyzer (Grafana → LLM 분석 → Slack)',
   active: false,
   nodes: alertNodes,
   connections: connect([
@@ -193,8 +202,8 @@ const alertWorkflow = {
     ['Diag: indexes', 'Diag: innodb status'],
     ['Diag: innodb status', 'Summarize DB diagnostics'],
     ['Summarize DB diagnostics', 'Build prompt'],
-    ['Build prompt', 'OpenAI analyze'],
-    ['OpenAI analyze', 'Build Slack message'],
+    ['Build prompt', 'LLM analyze'],
+    ['LLM analyze', 'Build Slack message'],
     ['Build Slack message', 'Send to Slack'],
   ]),
   settings: { executionOrder: 'v1', timezone: 'Asia/Seoul' },
