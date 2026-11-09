@@ -7,7 +7,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
-const src = (p) => readFileSync(join(root, 'src', p), 'utf8');
+// 줄바꿈을 LF 로 통일한다. Windows(core.autocrlf=true)에서 체크아웃 상태에 따라 CRLF 가 섞이면
+// 코드는 같아도 생성 JSON 이 달라져 의미 없는 diff 가 생긴다.
+const src = (p) => readFileSync(join(root, 'src', p), 'utf8').replace(/\r\n/g, '\n');
 
 const CRED = {
   diag: { mySql: { id: 'mysqlDiagCred001', name: 'MySQL diag (read-only)' } },
