@@ -5,6 +5,11 @@ const alerts = body.alerts ?? [];
 
 const BASE = '{app="alertlab", level="ERROR"}';
 
+// 전용 알럿(DbLockContention, HikariPending)이 담당하는 로그.
+// infra/grafana/provisioning/alerting/rules.yml 의 AppErrorLog 규칙이 제외하는 조건과 반드시 같아야 한다.
+// 다르면 알럿은 A 때문에 떴는데 분석은 B 로그를 보게 된다.
+const DEDICATED_ALERT_LOGS = '(?i)deadlock|lock wait timeout|Connection is not available';
+
 // 알럿 종류별로 "원인 로그" 를 찾는 Loki 쿼리를 다르게 잡는다
 function lokiQueryFor(alertname, errorType) {
   switch (alertname) {
@@ -12,8 +17,13 @@ function lokiQueryFor(alertname, errorType) {
       return `${BASE} |~ "(?i)deadlock|lock wait timeout"`;
     case 'HikariPending':
       return `${BASE} |~ "Connection is not available"`;
-    case 'AppErrorLog':
+    case 'AppErrorLog': {
+      // 규칙과 동일하게 전용 알럿 로그를 제외 (라인 필터는 | json 앞에 와야 한다)
+      const filtered = `${BASE} !~ "${DEDICATED_ALERT_LOGS}"`;
+      return errorType ? `${filtered} | json | error_type="${errorType}"` : filtered;
+    }
     case 'AppErrorBurst':
+      // 규칙이 모든 ERROR 로그를 세므로 제외 조건 없음
       return errorType ? `${BASE} | json | error_type="${errorType}"` : BASE;
     default:
       return BASE;
