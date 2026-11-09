@@ -14,6 +14,11 @@ spring:
     hibernate:
       ddl-auto: update
 
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+
 server:
   error:
     include-stacktrace: never

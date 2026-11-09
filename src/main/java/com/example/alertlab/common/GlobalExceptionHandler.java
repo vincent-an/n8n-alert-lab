@@ -1,7 +1,6 @@
 package com.example.alertlab.common;
 
 import java.sql.SQLException;
-import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -22,7 +21,7 @@ public class GlobalExceptionHandler {
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
     @ExceptionHandler(Exception.class)
-    public ResponseEntity<Map<String, String>> handle(Exception e) {
+    public ResponseEntity<ErrorResponse> handle(Exception e) {
         String errorType = isDbError(e) ? "db" : "app";
         MDC.put("error_type", errorType);
         try {
@@ -31,9 +30,7 @@ public class GlobalExceptionHandler {
             MDC.remove("error_type");
         }
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(Map.of(
-                        "error", e.getClass().getSimpleName(),
-                        "traceId", String.valueOf(MDC.get(MdcFilter.TRACE_ID))));
+                .body(new ErrorResponse(e.getClass().getSimpleName(), MDC.get(MdcFilter.TRACE_ID)));
     }
 
     private boolean isDbError(Throwable e) {
