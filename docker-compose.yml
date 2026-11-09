@@ -129,9 +129,9 @@ services:
       GENERIC_TIMEZONE: Asia/Seoul
       TZ: Asia/Seoul
       N8N_DIAGNOSTICS_ENABLED: "false"
-      # Code 노드에서 $env, fs(프롬프트·런북 파일 읽기) 사용 허용 — 로컬 실습 전용 설정
+      # Code 노드에서 $env, fs(프롬프트·런북 파일 읽기), crypto(웹훅 서명 검증·GitHub App JWT) 허용 — 로컬 실습 전용 설정
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
-      NODE_FUNCTION_ALLOW_BUILTIN: fs
+      NODE_FUNCTION_ALLOW_BUILTIN: fs,crypto
       # 워크플로가 참조하는 값 (워크플로 JSON 에 비밀값을 하드코딩하지 않기 위함)
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
       LLM_BASE_URL: ${LLM_BASE_URL}
@@ -139,6 +139,11 @@ services:
       LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-}
       GITHUB_OWNER: ${GITHUB_OWNER}
       GITHUB_REPO: ${GITHUB_REPO}
+      # PR 셀프 리뷰 봇 (GitHub App 개인키는 /secrets 마운트에서 읽음)
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      REVIEW_ALLOWED_ASSOCIATIONS: ${REVIEW_ALLOWED_ASSOCIATIONS:-OWNER}
+      REVIEW_REASONING_EFFORT: ${REVIEW_REASONING_EFFORT:-low}
       # 크리덴셜 import 용 (n8n 이 N8N_ENCRYPTION_KEY 로 암호화해 저장)
       LLM_API_KEY: ${LLM_API_KEY}
       DIAG_DB_PASSWORD: ${DIAG_DB_PASSWORD}
@@ -150,6 +155,8 @@ services:
       - ./n8n/prompts:/prompts:ro
       - ./docs/runbooks:/runbooks:ro
       - ./src:/repo-src:ro   # GitHub 에 아직 push 전일 때 코드 스니펫 fallback
+      - ./docs:/docs:ro      # PR 리뷰 기준 (docs/review-guide.md)
+      - ./secrets:/secrets:ro  # GitHub App 개인키 (gitignore 대상)
     depends_on:
       mysql:
         condition: service_healthy
@@ -159,6 +166,26 @@ services:
       timeout: 3s
       retries: 20
       start_period: 30s
+
+  # ---------------------------------------------------------------- tunnel (선택)
+  # GitHub 웹훅을 로컬 n8n 으로 받기 위한 터널. 테스트할 때만 켠다:
+  #   docker compose --profile tunnel up -d ngrok    /    docker compose stop ngrok
+  ngrok:
+    image: ngrok/ngrok:3.39.12-alpine
+    container_name: alertlab-ngrok
+    profiles: ["tunnel"]
+    command:
+      - http
+      - n8n:5678
+      - --url=https://${NGROK_DOMAIN}
+      - --traffic-policy-file=/etc/ngrok/traffic-policy.yml
+      - --log=stdout
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    volumes:
+      - ./infra/ngrok/traffic-policy.yml:/etc/ngrok/traffic-policy.yml:ro
+    depends_on:
+      - n8n
 
 volumes:
   app-logs:

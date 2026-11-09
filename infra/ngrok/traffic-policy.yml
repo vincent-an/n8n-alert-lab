@@ -1,0 +1,9 @@
+# ngrok 트래픽 정책: 외부에는 GitHub 웹훅 엔드포인트 하나만 연다.
+# 터널은 n8n 전체(5678)를 가리키므로, 이 정책이 없으면 n8n 로그인 화면·API 가 인터넷에 노출된다.
+on_http_request:
+  - expressions:
+      - "!(req.method == 'POST' && req.url.path == '/webhook/github-pr')"
+    actions:
+      - type: deny
+        config:
+          status_code: 404

@@ -7,7 +7,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(fileURLToPath(import.meta.url));
-const src = (p) => readFileSync(join(root, 'src', p), 'utf8');
+// 줄바꿈을 LF 로 통일한다. Windows(core.autocrlf=true)에서 체크아웃 상태에 따라 CRLF 가 섞이면
+// 코드는 같아도 생성 JSON 이 달라져 의미 없는 diff 가 생긴다.
+const src = (p) => readFileSync(join(root, 'src', p), 'utf8').replace(/\r\n/g, '\n');
 
 const CRED = {
   diag: { mySql: { id: 'mysqlDiagCred001', name: 'MySQL diag (read-only)' } },
@@ -30,7 +32,7 @@ const node = (name, type, typeVersion, position, parameters, extra = {}) => ({
 const code = (name, position, file, mode = 'runOnceForEachItem') =>
   node(name, 'n8n-nodes-base.code', 2, position, { mode, jsCode: src(file) });
 
-const ifNode = (name, position, leftValue, rightValue, type = 'string') =>
+const ifNode = (name, position, leftValue, rightValue, type = 'string', operation = 'equals') =>
   node(name, 'n8n-nodes-base.if', 2.2, position, {
     conditions: {
       options: { caseSensitive: true, leftValue: '', typeValidation: 'loose', version: 2 },
@@ -39,7 +41,7 @@ const ifNode = (name, position, leftValue, rightValue, type = 'string') =>
           id: `cond-${name}`,
           leftValue,
           rightValue,
-          operator: { type, operation: 'equals' },
+          operator: { type, operation },
         },
       ],
       combinator: 'and',
@@ -210,6 +212,139 @@ const alertWorkflow = {
   pinData: {},
 };
 
+// =====================================================================
+// 2단계: pr-reviewer (GitHub App 웹훅 → LLM 코드 리뷰 → PR 코멘트)
+// 실행 1번 = PR 1건이므로 앞 블록 참조는 .first() 를 쓴다
+// =====================================================================
+const P = 'pr-reviewer/';
+const VF = "$('Verify & filter').first().json";
+const GITHUB_HEADERS = (token) => ({
+  sendHeaders: true,
+  headerParameters: {
+    parameters: [
+      { name: 'Authorization', value: `=Bearer {{ ${token} }}` },
+      { name: 'Accept', value: 'application/vnd.github+json' },
+      { name: 'X-GitHub-Api-Version', value: '2022-11-28' },
+    ],
+  },
+});
+const INSTALLATION_TOKEN = "$('Get installation token').first().json.token";
+
+const prNodes = [
+  // 서명 검증에 "받은 그대로의 바이트" 가 필요하므로 raw body 를 켠다.
+  // 응답은 Respond 블록이 서명 검증 직후에 보낸다 (GitHub 10초 타임아웃 대응 + 서명 오류 시 401)
+  node('GitHub PR Webhook', 'n8n-nodes-base.webhook', 2.1, [0, 300], {
+    httpMethod: 'POST',
+    path: 'github-pr',
+    responseMode: 'responseNode',
+    options: { rawBody: true },
+  }, { webhookId: 'github-pr' }),
+
+  code('Verify & filter', [220, 300], P + '01-verify-and-filter.js', 'runOnceForAllItems'),
+  node('Respond to GitHub', 'n8n-nodes-base.respondToWebhook', 1.1, [440, 300], {
+    respondWith: 'json',
+    responseBody: '={{ JSON.stringify($json.respond.body) }}',
+    options: { responseCode: '={{ $json.respond.status }}' },
+  }),
+  ifNode('Should review?', [660, 300], '={{ $json.review }}', true, 'boolean'),
+
+  mysql('Check reviewed', [880, 200], CRED.ops,
+    'SELECT COUNT(*) AS done FROM pr_review WHERE repo = $1 AND pr_number = $2 AND head_sha = $3',
+    `={{ ${VF}.repo }},{{ ${VF}.pr.number }},{{ ${VF}.pr.head_sha }}`),
+  ifNode('Not reviewed yet?', [1100, 200], '={{ Number($json.done) }}', 0, 'number'),
+  // 먼저 "리뷰 중" 으로 선점해서, GitHub 재전송·연속 이벤트로 같은 커밋에 코멘트가 두 번 달리는 것을 막는다
+  mysql('Claim review', [1320, 200], CRED.ops,
+    "INSERT INTO pr_review (repo, pr_number, head_sha, status) VALUES ($1, $2, $3, 'reviewing')",
+    `={{ ${VF}.repo }},{{ ${VF}.pr.number }},{{ ${VF}.pr.head_sha }}`),
+
+  code('Build App JWT', [1540, 200], P + '02-build-app-jwt.js'),
+  node('Get installation token', 'n8n-nodes-base.httpRequest', 4.2, [1760, 200], {
+    method: 'POST',
+    url: '=https://api.github.com/app/installations/{{ $json.installation_id }}/access_tokens',
+    ...GITHUB_HEADERS('$json.jwt'),
+    options: { timeout: 10000 },
+  }),
+  // 응답(파일 배열)은 파일 1개 = item 1개로 펼쳐진다
+  node('List PR files', 'n8n-nodes-base.httpRequest', 4.2, [1980, 200], {
+    url: `=https://api.github.com/repos/{{ ${VF}.repo }}/pulls/{{ ${VF}.pr.number }}/files?per_page=100`,
+    ...GITHUB_HEADERS(INSTALLATION_TOKEN),
+    options: { timeout: 15000 },
+  }),
+  code('Build diff', [2200, 200], P + '03-build-diff.js', 'runOnceForAllItems'),
+  code('Build review prompt', [2420, 200], P + '04-build-review-prompt.js'),
+  node('LLM review', 'n8n-nodes-base.httpRequest', 4.2, [2640, 200], {
+    method: 'POST',
+    url: '={{ $env.LLM_BASE_URL }}/chat/completions',
+    authentication: 'genericCredentialType',
+    genericAuthType: 'httpHeaderAuth',
+    sendBody: true,
+    specifyBody: 'json',
+    jsonBody: '={{ JSON.stringify($json.llm_request) }}',
+    options: { timeout: 180000 },
+  }, {
+    credentials: CRED.llm,
+    retryOnFail: true,
+    maxTries: 3,
+    waitBetweenTries: 5000,
+    onError: 'continueRegularOutput',
+  }),
+  code('Render comment', [2860, 200], P + '05-render-comment.js'),
+  node('Post PR comment', 'n8n-nodes-base.httpRequest', 4.2, [3080, 200], {
+    method: 'POST',
+    url: `=https://api.github.com/repos/{{ ${VF}.repo }}/issues/{{ ${VF}.pr.number }}/comments`,
+    ...GITHUB_HEADERS(INSTALLATION_TOKEN),
+    sendBody: true,
+    specifyBody: 'json',
+    jsonBody: '={{ JSON.stringify({ body: $json.comment_body }) }}',
+    options: { timeout: 15000 },
+  }),
+  mysql('Mark commented', [3300, 200], CRED.ops,
+    "UPDATE pr_review SET status = 'commented', comment_url = $4 WHERE repo = $1 AND pr_number = $2 AND head_sha = $3",
+    `={{ ${VF}.repo }},{{ ${VF}.pr.number }},{{ ${VF}.pr.head_sha }},{{ $json.html_url }}`),
+  ifNode('Has critical?', [3520, 200], "={{ $('Render comment').first().json.critical_count }}", 0, 'number', 'gt'),
+  node('Notify Slack', 'n8n-nodes-base.httpRequest', 4.2, [3740, 100], {
+    method: 'POST',
+    url: '={{ $env.SLACK_WEBHOOK_URL }}',
+    sendBody: true,
+    specifyBody: 'json',
+    jsonBody: "={{ JSON.stringify($('Render comment').first().json.slack) }}",
+    options: { timeout: 10000 },
+  }, { onError: 'continueRegularOutput' }),
+];
+
+const prWorkflow = {
+  id: 'prReviewer000001',
+  name: 'pr-reviewer (GitHub PR → LLM 셀프 리뷰 → PR 코멘트)',
+  active: false,
+  nodes: prNodes,
+  connections: connect([
+    ['GitHub PR Webhook', 'Verify & filter'],
+    ['Verify & filter', 'Respond to GitHub'],
+    ['Respond to GitHub', 'Should review?'],
+    ['Should review?', 'Check reviewed', 0],
+    ['Check reviewed', 'Not reviewed yet?'],
+    ['Not reviewed yet?', 'Claim review', 0],
+    ['Claim review', 'Build App JWT'],
+    ['Build App JWT', 'Get installation token'],
+    ['Get installation token', 'List PR files'],
+    ['List PR files', 'Build diff'],
+    ['Build diff', 'Build review prompt'],
+    ['Build review prompt', 'LLM review'],
+    ['LLM review', 'Render comment'],
+    ['Render comment', 'Post PR comment'],
+    ['Post PR comment', 'Mark commented'],
+    ['Mark commented', 'Has critical?'],
+    ['Has critical?', 'Notify Slack', 0],
+  ]),
+  settings: { executionOrder: 'v1', timezone: 'Asia/Seoul' },
+  pinData: {},
+};
+
 mkdirSync(join(root, 'workflows'), { recursive: true });
-writeFileSync(join(root, 'workflows', 'alert-analyzer.json'), JSON.stringify(alertWorkflow, null, 2) + '\n');
-console.log('written: n8n/workflows/alert-analyzer.json');
+for (const [file, wf] of [
+  ['alert-analyzer.json', alertWorkflow],
+  ['pr-reviewer.json', prWorkflow],
+]) {
+  writeFileSync(join(root, 'workflows', file), JSON.stringify(wf, null, 2) + '\n');
+  console.log(`written: n8n/workflows/${file}`);
+}
